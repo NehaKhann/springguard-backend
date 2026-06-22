@@ -9,8 +9,9 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * Runs every rule against the submitted code, then turns the findings into a
- * 0-100 score and an A-F grade. This is the heart of Level 1.
+ * Runs every rule against code, then turns findings into a 0-100 score and A-F grade.
+ * Detection and scoring are separate so a repo scan can detect per-file, then score the
+ * combined findings with the exact same logic as a single-file scan.
  */
 public class RuleEngine {
 
@@ -20,24 +21,30 @@ public class RuleEngine {
         this.rules = rules;
     }
 
-    public ScanReport scan(String code) {
+    /** Detect findings in a single piece of code (no scoring). */
+    public List<Finding> detect(String code) {
         String safe = code == null ? "" : code;
-
         List<Finding> findings = new ArrayList<>();
         for (SecurityRule rule : rules) {
             if (rule.matches(safe)) {
                 findings.add(new Finding(rule.id(), rule.severity(), rule.title(), rule.why(), rule.fix()));
             }
         }
+        return findings;
+    }
 
-        // Highest severity first so the report reads worst-to-least.
-        findings.sort(Comparator.comparingInt(f -> f.severity().ordinal()));
-
-        int score = computeScore(findings);
+    /** Build a scored report from an already-collected list of findings. */
+    public ScanReport reportFrom(List<Finding> findings) {
+        List<Finding> sorted = new ArrayList<>(findings);
+        sorted.sort(Comparator.comparingInt(f -> f.severity().ordinal()));
+        int score = computeScore(sorted);
         String grade = grade(score);
-        String summary = summarise(findings, grade);
+        String summary = summarise(sorted, grade);
+        return new ScanReport(score, grade, summary, sorted);
+    }
 
-        return new ScanReport(score, grade, summary, findings);
+    public ScanReport scan(String code) {
+        return reportFrom(detect(code));
     }
 
     private int computeScore(List<Finding> findings) {
@@ -58,7 +65,7 @@ public class RuleEngine {
 
     private String summarise(List<Finding> findings, String grade) {
         if (findings.isEmpty()) {
-            return "No known issues found in this snippet. Grade " + grade + ".";
+            return "No known issues found. Grade " + grade + ".";
         }
         long high = findings.stream().filter(f -> f.severity() == Severity.HIGH).count();
         long medium = findings.stream().filter(f -> f.severity() == Severity.MEDIUM).count();
