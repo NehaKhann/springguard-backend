@@ -51,6 +51,12 @@ public class ScanHistoryService {
                 .stream().map(this::toResponse).toList();
     }
 
+    public void delete(Long id) {
+        ScanRecord record = records.findByIdAndUser(id, currentUser())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Scan not found."));
+        records.delete(record);
+    }
+
     private ScanRecordResponse toResponse(ScanRecord r) {
         return new ScanRecordResponse(r.getId(), r.getGrade(), r.getScore(), r.getSummary(),
                 r.getCreatedAt().toString(), readFindings(r.getFindingsJson()));

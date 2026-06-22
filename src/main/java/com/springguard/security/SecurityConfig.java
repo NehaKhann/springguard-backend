@@ -51,7 +51,7 @@ public class SecurityConfig {
                 "https://*.vercel.app",
                 "http://localhost:5173",
                 "http://localhost:3000"));
-        config.setAllowedMethods(List.of("GET", "POST"));
+        config.setAllowedMethods(List.of("GET", "POST", "DELETE"));
         config.setAllowedHeaders(List.of("*"));
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);

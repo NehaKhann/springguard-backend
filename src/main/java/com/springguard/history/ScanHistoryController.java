@@ -22,4 +22,9 @@ public class ScanHistoryController {
     public List<ScanRecordResponse> list() {
         return service.listForCurrentUser();
     }
+
+    @DeleteMapping("/{id}")
+    public void delete(@PathVariable Long id) {
+        service.delete(id);
+    }
 }
