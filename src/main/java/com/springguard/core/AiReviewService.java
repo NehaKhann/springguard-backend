@@ -33,6 +33,18 @@ public class AiReviewService {
         If you find nothing, return {"findings":[]}. Keep each field to one or two sentences.
         """;
 
+    private static final String FIX_PROMPT = """
+        You are a Spring Boot security expert. Rewrite the user's code to fix ALL security issues:
+        both mechanical ones (disabled CSRF, permitAll, wildcard CORS, hardcoded secrets, weak or
+        zero-expiry JWT, SQL injection) AND logic/authorization flaws. For logic flaws, add REAL
+        protective code, not just comments: for IDOR / missing ownership checks, verify the resource
+        belongs to the authenticated user (compare the resource owner to the current principal and
+        deny access otherwise); for authentication bypasses, enforce proper validation; for untrusted
+        input, validate or parameterize it. Preserve the original functionality and structure as
+        closely as possible and keep it valid, compilable Spring Boot / Java.
+        Return ONLY the corrected code. No explanations, no comments about changes, no markdown fences.
+        """;
+
     private static final int MAX_CHARS = 8000;
 
     private final String apiKey;
@@ -113,6 +125,49 @@ public class AiReviewService {
             }
         }
         return out;
+    }
+
+    /** Ask the model to rewrite the code with security issues fixed. Returns null if unavailable. */
+    public String fix(String code) {
+        if (!isEnabled() || code == null || code.isBlank()) {
+            return null;
+        }
+        String snippet = code.length() > MAX_CHARS ? code.substring(0, MAX_CHARS) : code;
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model,
+                    "temperature", 0.1,
+                    "messages", List.of(
+                            Map.of("role", "system", "content", FIX_PROMPT),
+                            Map.of("role", "user", "content", snippet)
+                    )
+            );
+            String response = http.post()
+                    .uri(baseUrl + "/chat/completions")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(String.class);
+
+            JsonNode root = mapper.readTree(response);
+            String content = root.path("choices").path(0).path("message").path("content").asText("");
+            return stripFences(content);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Remove a leading ```lang line and trailing ``` if the model wrapped the code in a fence. */
+    private String stripFences(String content) {
+        if (content == null) return null;
+        String c = content.trim();
+        if (c.startsWith("```")) {
+            int firstNl = c.indexOf('\n');
+            if (firstNl >= 0) c = c.substring(firstNl + 1);
+            if (c.endsWith("```")) c = c.substring(0, c.length() - 3);
+        }
+        return c.trim();
     }
 
     private Severity parseSeverity(String s) {

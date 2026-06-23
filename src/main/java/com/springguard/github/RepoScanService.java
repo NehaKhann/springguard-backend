@@ -29,32 +29,34 @@ public class RepoScanService {
             return msg("BAD_URL", "Enter a GitHub repo URL like https://github.com/owner/repo.", null);
         }
         String target = repo.owner() + "/" + repo.name();
-        System.out.println("[SCAN-REPO] url=" + repoUrl + " parsedTarget=" + target
-                + " urlBranch=" + repo.branch() + " requestedBranch=" + requestedBranch
-                + " hasToken=" + (token != null && !token.isBlank()));
 
         try {
             String defaultBranch = github.defaultBranch(repo, token); // also validates the repo exists
-            System.out.println("[SCAN-REPO] defaultBranch=" + defaultBranch);
 
             // Branch precedence: explicit field > branch in URL > repo default.
             String chosen = (requestedBranch != null && !requestedBranch.isBlank())
                     ? requestedBranch.trim()
                     : (repo.branch() != null && !repo.branch().isBlank() ? repo.branch() : null);
 
-            System.out.println("[SCAN-REPO] chosen=" + chosen);
-            String branch = (chosen == null) ? defaultBranch : chosen;
+            String branch;   // the branch name (used for fetching file contents)
+            String treeish;  // what we hand to the trees API (default name, or a validated SHA)
 
-            // Resolve the branch to a commit SHA. null => the branch does not exist.
-            String sha = github.branchSha(repo, branch, token);
-            System.out.println("[SCAN-REPO] branch=" + branch + " sha=" + sha);
-            if (sha == null) {
-                return msg("BRANCH_NOT_FOUND",
-                        "Branch '" + branch + "' was not found in " + target + ".", target);
+            if (chosen == null) {
+                // Default-branch scan: lean path, no extra branch-list call.
+                branch = defaultBranch;
+                treeish = defaultBranch;
+            } else {
+                // Explicit branch: validate it genuinely exists, then list by its commit SHA.
+                String sha = github.branchSha(repo, chosen, token);
+                if (sha == null) {
+                    return msg("BRANCH_NOT_FOUND",
+                            "Branch '" + chosen + "' was not found in " + target + ".", target);
+                }
+                branch = chosen;
+                treeish = sha;
             }
 
-            // Use the SHA (not the branch name) for the trees API — this is the reliable form.
-            List<String> files = github.listRelevantFiles(repo, sha, token);
+            List<String> files = github.listRelevantFiles(repo, treeish, token);
             if (files.isEmpty()) {
                 return new RepoScanReport(0, "\u2014", "", List.of(),
                         "NO_FILES", "No Java or Spring config files found on branch '" + branch + "'.", 0, target);
@@ -84,17 +86,14 @@ public class RepoScanService {
 
         } catch (RestClientResponseException e) {
             int code = e.getStatusCode().value();
-            System.out.println("[SCAN-REPO] OUTER RestClientResponseException code=" + code
-                    + " body=" + e.getResponseBodyAsString());
             String message = switch (code) {
                 case 401 -> "The token was rejected. Check it has Contents read access.";
-                case 403 -> "GitHub rate limit reached. Add a token, or try again later.";
+                case 403 -> "GitHub rate limit reached. Add a GitHub token (it raises the limit from 60 to 5,000 per hour), or try again in a little while.";
                 case 404 -> "Repo not found. If it's private, provide a token with Contents read access.";
                 default -> "GitHub request failed (" + code + "). Please try again.";
             };
             return msg("ERROR", message, target);
         } catch (Exception e) {
-            System.out.println("[SCAN-REPO] OUTER Exception " + e.getClass().getName() + ": " + e.getMessage());
             return msg("ERROR", "Could not scan that repo. Please check the URL and try again.", target);
         }
     }
