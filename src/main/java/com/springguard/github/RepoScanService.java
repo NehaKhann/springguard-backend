@@ -33,33 +33,56 @@ public class RepoScanService {
         try {
             String defaultBranch = github.defaultBranch(repo, token); // also validates the repo exists
 
-            // Branch precedence: explicit field > branch in URL > repo default.
-            String chosen = (requestedBranch != null && !requestedBranch.isBlank())
-                    ? requestedBranch.trim()
-                    : (repo.branch() != null && !repo.branch().isBlank() ? repo.branch() : null);
+            // Branch comes from: explicit field > branch in URL > repo default.
+            // The folder/file SCOPE always comes from the URL (e.g. /tree/main/src/core or
+            // /blob/main/.../Foo.java) — so you can scope to a folder AND override the branch
+            // via the field at the same time.
+            String fieldBranch = (requestedBranch != null && !requestedBranch.isBlank())
+                    ? requestedBranch.trim().replaceAll("^/+|/+$", "")
+                    : null;
+            String urlCandidate = (repo.branch() != null && !repo.branch().isBlank())
+                    ? repo.branch()
+                    : null;
 
             String branch;   // the branch name (used for fetching file contents)
             String treeish;  // what we hand to the trees API (default name, or a validated SHA)
+            String scope = null; // optional folder/file path to limit the scan to
 
-            if (chosen == null) {
+            if (fieldBranch == null && urlCandidate == null) {
                 // Default-branch scan: lean path, no extra branch-list call.
                 branch = defaultBranch;
                 treeish = defaultBranch;
             } else {
-                // Explicit branch: validate it genuinely exists, then list by its commit SHA.
-                String sha = github.branchSha(repo, chosen, token);
-                if (sha == null) {
-                    return msg("BRANCH_NOT_FOUND",
-                            "Branch '" + chosen + "' was not found in " + target + ".", target);
+                java.util.Map<String, String> branches = github.branchShaMap(repo, token);
+
+                // Pull the folder/file scope out of the URL by resolving the URL's own branch
+                // prefix (independent of the field), and treating the leftover as the scope.
+                if (urlCandidate != null) {
+                    String urlBranch = github.resolveBranch(branches, urlCandidate);
+                    if (urlBranch != null && urlCandidate.length() > urlBranch.length()) {
+                        String leftover = urlCandidate.substring(urlBranch.length()).replaceAll("^/+", "");
+                        if (!leftover.isBlank()) scope = leftover;
+                    }
                 }
-                branch = chosen;
-                treeish = sha;
+
+                // The branch to actually scan: field wins, else the URL's branch.
+                String candidate = fieldBranch != null ? fieldBranch : urlCandidate;
+                String real = github.resolveBranch(branches, candidate);
+                if (real == null) {
+                    return msg("BRANCH_NOT_FOUND",
+                            "Branch '" + candidate + "' was not found in " + target + ".", target);
+                }
+                branch = real;
+                treeish = branches.get(real);
             }
 
-            List<String> files = github.listRelevantFiles(repo, treeish, token);
+            List<String> files = github.listRelevantFiles(repo, treeish, token, scope);
             if (files.isEmpty()) {
+                String where = scope != null
+                        ? "under '" + scope + "' on branch '" + branch + "'"
+                        : "on branch '" + branch + "'";
                 return new RepoScanReport(0, "\u2014", "", List.of(),
-                        "NO_FILES", "No Java or Spring config files found on branch '" + branch + "'.", 0, target);
+                        "NO_FILES", "No Java or Spring config files found " + where + ".", 0, target);
             }
 
             List<Finding> all = new ArrayList<>();
@@ -80,7 +103,8 @@ public class RepoScanService {
             }
 
             ScanReport rep = engine.reportFrom(all);
-            String summary = target + " (" + branch + ") \u2014 scanned " + scanned + " file(s). " + rep.summary();
+            String scopeLabel = scope != null ? ", " + scope : "";
+            String summary = target + " (" + branch + scopeLabel + ") \u2014 scanned " + scanned + " file(s). " + rep.summary();
             return new RepoScanReport(rep.score(), rep.grade(), summary, rep.findings(),
                     "ANALYZED", null, scanned, target);
 

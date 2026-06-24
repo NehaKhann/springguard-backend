@@ -38,9 +38,28 @@ public class FixController {
             return new RepoFixResponse("ERROR", "Invalid repository URL.", request.path(), null, null);
         }
         try {
-            String branch = (request.branch() != null && !request.branch().isBlank())
-                    ? request.branch().trim()
-                    : github.defaultBranch(repo, request.token());
+            // Resolve the branch the same way scanning does: field > URL branch > default,
+            // validated against the real branch list (handles slash branches + branch/folder URLs).
+            String fieldBranch = (request.branch() != null && !request.branch().isBlank())
+                    ? request.branch().trim().replaceAll("^/+|/+$", "")
+                    : null;
+            String urlCandidate = (repo.branch() != null && !repo.branch().isBlank())
+                    ? repo.branch()
+                    : null;
+
+            String branch;
+            if (fieldBranch == null && urlCandidate == null) {
+                branch = github.defaultBranch(repo, request.token());
+            } else {
+                String candidate = fieldBranch != null ? fieldBranch : urlCandidate;
+                java.util.Map<String, String> branches = github.branchShaMap(repo, request.token());
+                String real = github.resolveBranch(branches, candidate);
+                if (real == null) {
+                    return new RepoFixResponse("ERROR",
+                            "Branch '" + candidate + "' was not found.", request.path(), null, null);
+                }
+                branch = real;
+            }
 
             String original = github.fetchFile(repo, branch, request.path(), request.token());
             if (original == null || original.isBlank()) {

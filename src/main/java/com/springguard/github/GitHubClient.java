@@ -35,6 +35,7 @@ public class GitHubClient {
     public Repo parse(String url) {
         if (url == null) return null;
         String u = url.trim().replaceFirst("^https?://", "").replaceFirst("^www\\.", "");
+        u = u.replaceAll("[#?].*$", ""); // drop #line-anchors and ?query params
         if (!u.startsWith("github.com/")) return null;
         String[] parts = u.substring("github.com/".length()).split("/");
         if (parts.length < 2) return null;
@@ -44,9 +45,17 @@ public class GitHubClient {
         if (owner.isBlank() || repo.isBlank()) return null;
 
         String branch = null;
-        // .../tree/<branch>[/...]
-        if (parts.length >= 4 && "tree".equals(parts[2]) && !parts[3].isBlank()) {
-            branch = parts[3];
+        // .../tree/<branch>[/folder...]  or  .../blob/<branch>/<file>
+        // We keep the whole segment after tree/blob as a "candidate"; the real branch and any
+        // folder/file scope are separated later against the actual branch list.
+        if (parts.length >= 4 && ("tree".equals(parts[2]) || "blob".equals(parts[2]))) {
+            StringBuilder b = new StringBuilder();
+            for (int i = 3; i < parts.length; i++) {
+                if (parts[i].isBlank()) continue;
+                if (b.length() > 0) b.append('/');
+                b.append(parts[i]);
+            }
+            if (b.length() > 0) branch = b.toString();
         }
         return new Repo(owner, repo, branch);
     }
@@ -58,7 +67,12 @@ public class GitHubClient {
 
     /** All branch names that actually exist in the repo (paged, capped). */
     public java.util.List<String> listBranchNames(Repo repo, String token) throws Exception {
-        java.util.List<String> names = new ArrayList<>();
+        return new ArrayList<>(branchShaMap(repo, token).keySet());
+    }
+
+    /** All branches in the repo as name -> commit SHA (paged, capped). One source of truth. */
+    public java.util.Map<String, String> branchShaMap(Repo repo, String token) throws Exception {
+        java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
         for (int page = 1; page <= 5; page++) { // up to 500 branches
             String url = "https://api.github.com/repos/" + repo.owner() + "/" + repo.name()
                     + "/branches?per_page=100&page=" + page;
@@ -67,11 +81,33 @@ public class GitHubClient {
             if (!arr.isArray() || arr.isEmpty()) break;
             for (JsonNode b : arr) {
                 String name = b.path("name").asText("");
-                if (!name.isBlank()) names.add(name);
+                String sha = b.path("commit").path("sha").asText("");
+                if (!name.isBlank() && !sha.isBlank()) map.put(name, sha);
             }
             if (arr.size() < 100) break;
         }
-        return names;
+        return map;
+    }
+
+    /**
+     * A GitHub "/tree/" URL segment can be a branch, OR a branch followed by a folder path,
+     * and a branch name can itself contain slashes. Resolve the real branch by matching the
+     * longest leading prefix of {@code candidate} against the actual branch names.
+     * Returns the matched branch name (and its SHA via the out-map) or null if none match.
+     */
+    public String resolveBranch(java.util.Map<String, String> branches, String candidate) {
+        if (candidate == null || candidate.isBlank()) return null;
+        String[] parts = candidate.split("/");
+        for (int k = parts.length; k >= 1; k--) {
+            StringBuilder b = new StringBuilder();
+            for (int i = 0; i < k; i++) {
+                if (i > 0) b.append('/');
+                b.append(parts[i]);
+            }
+            String name = b.toString();
+            if (branches.containsKey(name)) return name;
+        }
+        return null;
     }
 
     /** Exact commit SHA for a branch that is confirmed to exist, else null. */
@@ -93,18 +129,21 @@ public class GitHubClient {
         }
     }
 
-    public List<String> listRelevantFiles(Repo repo, String treeish, String token) throws Exception {
+    public List<String> listRelevantFiles(Repo repo, String treeish, String token, String scope) throws Exception {
         String url = "https://api.github.com/repos/" + repo.owner() + "/" + repo.name()
                 + "/git/trees/" + treeish + "?recursive=1";
         String json = apiGet(url, token, false);
         JsonNode tree = mapper.readTree(json).path("tree");
 
+        boolean scoped = scope != null && !scope.isBlank();
         List<String> files = new ArrayList<>();
         if (tree.isArray()) {
             for (JsonNode node : tree) {
                 if (!"blob".equals(node.path("type").asText())) continue;
                 String path = node.path("path").asText("");
                 long size = node.path("size").asLong(0);
+                // If a folder/file scope is given, only include paths inside it (before the cap).
+                if (scoped && !(path.equals(scope) || path.startsWith(scope + "/"))) continue;
                 if (isRelevant(path) && size <= MAX_FILE_BYTES) {
                     files.add(path);
                 }
